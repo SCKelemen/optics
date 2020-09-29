@@ -1,3 +1,7 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE EmptyCase #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE UndecidableInstances #-}
 -- |
 -- Module: Optics.Traversal
 -- Description: Lifts an effectful operation on elements to act on structures.
@@ -79,6 +83,11 @@ module Optics.Traversal
   -- ('<>') operator could not be used to combine optics of different kinds.
   , adjoin
 
+  -- * Generics
+  , gplate
+  , gplateDepth
+  , GPlated
+
   -- * Subtyping
   , A_Traversal
   -- | <<diagrams/Traversal.png Traversal in the optics hierarchy>>
@@ -96,9 +105,10 @@ import Control.Applicative
 import Control.Applicative.Backwards
 import Control.Monad.Trans.State
 import Data.Functor.Identity
+import GHC.Generics
+import GHC.TypeLits
 
 import Data.Profunctor.Indexed
-
 import Optics.AffineTraversal
 import Optics.Fold
 import Optics.Internal.Optic
@@ -470,6 +480,80 @@ adjoin4 o1 o2 o3 o4 = combined % traversed
       []       ->            pure a
 {-# INLINE [1] adjoin4 #-}
 
+----------------------------------------
+
+-- | Traverse immediate occurrences of the type @a@ within the type @s@ using
+-- its 'Generic' instance.
+--
+-- >>> toListOf gplate ('h', ((), 'e', Just 'l'), "lo") :: String
+-- "hello"
+--
+-- If you need custom traversal depth (the default is 25), use 'gplateDepth'.
+--
+-- /Note:/ types without a 'Generic' instance are ignored during the
+-- traversal.
+gplate :: (Generic s, GPlated 25 (Rep s) a) => Traversal' s a
+gplate = gplateDepth @25
+{-# INLINE gplate #-}
+
+-- | 'gplate' with custimizable traversal depth.
+--
+-- >>> toListOf (gplateDepth @0) ('p', ['a'], [['s']], [[['s']]]) :: String
+-- "p"
+-- >>> toListOf (gplateDepth @1) ('p', ['a'], [['s']], [[['s']]]) :: String
+-- "pa"
+-- >>> toListOf (gplateDepth @2) ('p', ['a'], [['s']], [[['s']]]) :: String
+-- "pas"
+-- >>> toListOf (gplateDepth @3) ('p', ['a'], [['s']], [[['s']]]) :: String
+-- "pass"
+gplateDepth
+  :: forall depth s a. (Generic s, GPlated depth (Rep s) a)
+  => Traversal' s a
+gplateDepth = traversalVL $ \f s -> to <$> gplated @depth f (from s)
+{-# INLINE gplateDepth #-}
+
+class GPlated (n :: Nat) g a where
+  gplated :: TraversalVL' (g p) a
+
+instance GPlated n f a => GPlated n (M1 i c f) a where
+  gplated f (M1 x) = M1 <$> gplated @n f x
+
+instance (GPlated n f a, GPlated n g a) => GPlated n (f :+: g) a where
+  gplated f (L1 x) = L1 <$> gplated @n f x
+  gplated f (R1 x) = R1 <$> gplated @n f x
+
+instance (GPlated n f a, GPlated n g a) => GPlated n (f :*: g) a where
+  gplated f (x :*: y) = (:*:) <$> gplated @n f x <*> gplated @n f y
+
+-- | Matching type.
+instance {-# OVERLAPPING #-} GPlated n (K1 i a) a where
+  gplated f (K1 a) = K1 <$> f a
+
+-- | Recurse into the inner type if it has a 'Generic' instance.
+instance
+  ( GPlateInner (HasRep (Rep b)) (1 <=? n) (n - 1) b a
+  ) => GPlated n (K1 i b) a where
+  gplated f (K1 b) = K1 <$> gplateInner @(HasRep (Rep b)) @(1 <=? n) @(n - 1) f b
+
+instance GPlated n U1 a where
+  gplated _ = pure
+
+instance GPlated n V1 a where
+  gplated _ = \case {}
+
+instance GPlated n (URec b) a where
+  gplated _ = pure
+
+class GPlateInner (repDefined :: RepDefined) (p :: Bool) (n :: Nat) b a where
+  gplateInner :: TraversalVL' b a
+
+instance (Generic b, GPlated n (Rep b) a) => GPlateInner 'RepDefined 'True n b a where
+  gplateInner f = fmap to . gplated @n f . from
+
+instance {-# INCOHERENT #-} GPlateInner repNotDefined depthExceeded n b a where
+  gplateInner _ = pure
+
 -- $setup
+-- >>> :set -XDataKinds
 -- >>> import Data.List
 -- >>> import Optics.Core
